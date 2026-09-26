@@ -37,14 +37,16 @@ fi
 chmod +x "$LOCAL_BIN/oc-remote"
 success "Installed oc-remote."
 
-# 3. Install OpenCode TUI plugin
+# 3. Install OpenCode TUI plugin (CLI plugin)
 info "Installing OpenCode TUI plugin to $CLI_PLUGIN_DIR/remote.ts..."
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/src/tui.ts" ]; then
   cp "$SCRIPT_DIR/src/tui.ts" "$CLI_PLUGIN_DIR/remote.ts"
+elif [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/src/tui.tsx" ]; then
+  cp "$SCRIPT_DIR/src/tui.tsx" "$CLI_PLUGIN_DIR/remote.ts"
 else
   curl -fsSL "$REPO_RAW/src/tui.ts" -o "$CLI_PLUGIN_DIR/remote.ts"
 fi
-success "Installed plugin remote.ts."
+success "Installed plugin to $CLI_PLUGIN_DIR/remote.ts."
 
 # 4. Copy configuration template if none exist
 if [ ! -f "$REMOTE_CONF_DIR/example.env" ]; then
@@ -56,7 +58,7 @@ if [ ! -f "$REMOTE_CONF_DIR/example.env" ]; then
   fi
 fi
 
-# 5. Configure ~/.config/opencode/cli.json to register the plugin
+# 5. Configure ~/.config/opencode/cli.json to register the CLI plugin
 info "Configuring OpenCode CLI plugins in $CLI_JSON..."
 python3 - << 'PYEOF' || true
 import json, os

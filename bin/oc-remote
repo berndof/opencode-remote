@@ -80,9 +80,12 @@ auth_header() {
 }
 
 health_code() {
-  curl -s -o /dev/null -m 4 -w '%{http_code}' \
+  local code
+  code=$(curl -s -o /dev/null -m 4 -w '%{http_code}' \
     -H "$(auth_header)" \
-    "http://127.0.0.1:${LOCAL_PORT}/api/info" 2>/dev/null || printf '000'
+    "http://127.0.0.1:${LOCAL_PORT}/api/info" 2>/dev/null) || code="000"
+  [ -z "$code" ] && code="000"
+  printf '%s' "$code"
 }
 
 port_listen() {
@@ -220,7 +223,7 @@ cmd_status() {
   case "$code" in
     200) printf 'auth/api    \033[32m200 OK\033[0m (authenticated successfully)\n' ;;
     401) printf 'auth/api    \033[31m401 UNAUTHORIZED\033[0m (password in .env is incorrect)\n' ;;
-    000) printf 'auth/api    \033[33mNO RESPONSE\033[0m (tunnel or remote service is down)\n' ;;
+    000|000000) printf 'auth/api    \033[33mNO RESPONSE\033[0m (tunnel or remote service is down)\n' ;;
     *)   printf 'auth/api    \033[33mHTTP %s\033[0m\n' "$code" ;;
   esac
   printf 'launch      oc-remote %s\n\n' "$HOST"
@@ -298,6 +301,8 @@ cmd_tui() {
   ensure_all
   step "Connecting OpenCode TUI to http://127.0.0.1:${LOCAL_PORT} ($SSH_HOST)…"
   export OPENCODE_PASSWORD
+  export OPENCODE_REMOTE_HOST="$HOST"
+  export OPENCODE_REMOTE_PORT="$LOCAL_PORT"
   local url="http://127.0.0.1:${LOCAL_PORT}"
 
   if [ ${#OPENCODE_ARGS[@]} -eq 0 ]; then
