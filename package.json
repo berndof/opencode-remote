@@ -1,0 +1,38 @@
+{
+  "name": "opencode-remote",
+  "version": "0.1.0",
+  "description": "Seamless remote development with OpenCode over SSH tunnels with service lifecycle and TUI integration",
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "oc-remote": "bin/oc-remote"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "install.sh"
+  ],
+  "scripts": {
+    "install-local": "./install.sh"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "remote-development",
+    "ssh",
+    "tunnel",
+    "tui",
+    "developer-tools"
+  ],
+  "author": "berndof <bernardofb@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/berndof/opencode-remote.git"
+  },
+  "bugs": {
+    "url": "https://github.com/berndof/opencode-remote/issues"
+  },
+  "homepage": "https://github.com/berndof/opencode-remote#readme"
+}
