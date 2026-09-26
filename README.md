@@ -1,17 +1,18 @@
 # opencode-remote 🚀
 
-> Seamless remote development with [OpenCode](https://opencode.ai) over secure SSH tunnels, with automated background service lifecycle management and native TUI integration.
+> Seamless remote development with [OpenCode](https://opencode.ai) over secure SSH tunnels, with automated background service lifecycle management, environment status badge, and native TUI integration.
 
 ---
 
 ## 🎯 The Problem
 
 When running OpenCode on remote development servers (AWS EC2, Lightsail, Hetzner, homelabs, or cloud VMs):
-- You must manually open SSH tunnels (`ssh -L 7096:127.0.0.1:7096 ...`).
+- You must manually open and manage SSH tunnels (`ssh -L 7096:127.0.0.1:7096 ...`).
 - If the remote headless server isn't running, you have to SSH in to start `opencode service start`.
 - You need to track and authenticate with random service passwords across sessions.
 - OpenCode's local client needs specific flags (`--server http://127.0.0.1:7096`) and the remote directory path.
-- When networks drop, stale tunnels block local ports.
+- When networks drop, stale tunnels block local ports and freeze sessions.
+- In multi-tab or terminal setups, it's easy to lose track of whether a session is local or connected to a remote machine.
 
 **opencode-remote** solves this completely. One command sets up SSH multiplexing, starts the remote service if needed, opens and verifies the tunnel, authenticates, and connects your local OpenCode TUI or opens the Web UI.
 
@@ -21,6 +22,7 @@ When running OpenCode on remote development servers (AWS EC2, Lightsail, Hetzner
 
 - **⚡ Instant TUI Connection:** Run `oc-remote <host>` or `ocd <host>` to attach your local OpenCode TUI to any remote server.
 - **📁 Custom Remote Folders:** Pass directories or flags directly: `oc-remote <host> ~/projects/api -c`.
+- **🏷️ Persistent Environment Badge:** Automatic status indicator in the OpenCode prompt footer showing `🖥️ remote: <host>` (or `💻 local`) so you always know where you are coding.
 - **🌐 Web UI Launcher:** Run `oc-remote web <host>` to generate a pairing token and launch the web interface in your local browser.
 - **🛡️ Robust Tunneling:** SSH socket multiplexing (`ControlMaster`) ensures instantaneous reconnects and clean teardowns without orphan ports.
 - **🔄 Auto-Service Recovery:** Checks remote service health; if stopped or killed, it launches `opencode service start` remotely.
@@ -143,16 +145,42 @@ ocd portal-dev ~/Workspace/my-project
 
 ## 🎨 OpenCode TUI Integration
 
-Once installed, the TUI plugin provides the `/remote` command inside OpenCode:
+The plugin automatically adds an environment status badge to your footer and gives you the `/remote` command inside OpenCode:
 
-1. Type `/remote` in any session prompt (or search `Remote Servers` in `Ctrl+P` Command Palette).
-2. Select your configured server.
-3. Choose an action:
+1. Look at the prompt footer: you will see `🖥️ remote: portal-dev` when connected remotely, or `💻 local` on local sessions.
+2. Type `/remote` in any session prompt (or search `Remote Servers` in `Ctrl+P` Command Palette).
+3. Select your configured server and choose an action:
    - 🔍 **Status / Diagnostics**: Runs the diagnostic healthcheck.
    - 🌐 **Open Web UI**: Launches your browser directly to the paired remote interface.
    - 🔗 **Copy Pairing Link**: Copies the one-time `/connect#...` auth URL.
    - ⬆ **Start Service & Tunnel**: Ensures the remote environment is ready in background.
    - ⬇ **Stop Tunnel**: Drops the SSH tunnel when you are done.
+
+---
+
+## 🏗️ Architecture Under the Hood
+
+```text
+Local Machine                                Remote Server
+┌───────────────────────────┐                ┌──────────────────────────┐
+│  OpenCode TUI Client      │                │  OpenCode Service        │
+│  (CLI + plugins)          │                │  (headless background)   │
+│           │               │                │           ▲              │
+│     HTTP  │ (localhost)   │                │           │              │
+│           ▼               │                │           │              │
+│  127.0.0.1:7096           │                │  127.0.0.1:7096          │
+│           ▲               │                │           ▲              │
+│           │   Encrypted   │   SSH Tunnel   │           │              │
+│  SSH -L ──┴───────────────┼────────────────┼───────────┘              │
+│  (ControlMaster socket)   │                │                          │
+└───────────────────────────┘                └──────────────────────────┘
+```
+
+1. **Pre-flight Check**: `oc-remote` verifies SSH reachability with batch mode timeout.
+2. **Headless Lifecycle**: Checks remote `opencode service status`; if inactive, launches `opencode service start`.
+3. **Multiplexed Tunnel**: Uses an isolated SSH master socket in `~/.cache/oc-remote/<host>.ctl`.
+4. **Auth Handshake**: Tests `/api/info` with HTTP Basic Auth headers using the stored service password.
+5. **Session Launch**: Spawns `opencode --server http://127.0.0.1:<PORT> <DIR>` with exported environment hints.
 
 ---
 
