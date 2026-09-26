@@ -1,6 +1,6 @@
 {
   "name": "opencode-remote",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Seamless remote development with OpenCode over SSH tunnels with service lifecycle and TUI integration",
   "type": "module",
   "main": "src/index.ts",
