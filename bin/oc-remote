@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+#
+# oc-remote — Seamless remote development with OpenCode over SSH tunnels.
+#
+# https://github.com/berndof/opencode-remote
+#
+set -uo pipefail
+
+VERSION="0.1.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/remote"
+CTL_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/oc-remote"
+mkdir -p "$CTL_DIR"
+
+HOST=""
+CMD="tui"
+OPENCODE_ARGS=()
+
+# ---------------------------------------------------------------- helpers ---
+
+die()  { printf '\033[31moc-remote error:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '  %s\n' "$*"; }
+step() { printf '\033[36m•\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m! warning:\033[0m %s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOU'
+oc-remote — OpenCode Remote Connector
+
+USAGE:
+  oc-remote <host> [dir|flags...]     Connect TUI to remote server (starts service & tunnel)
+  oc-remote up <host>                 Ensure remote service is running and tunnel is active
+  oc-remote down <host>               Tear down the SSH tunnel
+  oc-remote web <host>                Open remote Web UI in your local browser
+  oc-remote link <host>               Generate and print one-time pair/auth link
+  oc-remote status <host>             Check SSH, remote service, tunnel, and authentication
+  oc-remote init <host>               Create a new host configuration file interactively
+  oc-remote list                      List all configured remote hosts
+  oc-remote version                   Show version information
+
+EXAMPLES:
+  oc-remote portal-dev                         # Connect to default remote folder
+  oc-remote portal-dev ~/projects/api          # Connect to specific remote directory
+  oc-remote portal-dev -c                      # Continue last remote session
+  oc-remote portal-dev ~/projects/api -c       # Open remote directory and continue session
+  oc-remote web portal-dev                     # Open Web UI in default browser
+  oc-remote status portal-dev                  # Diagnostic report
+
+CONFIG:
+  Host configs are stored in: ~/.config/opencode/remote/<host>.env (chmod 600)
+EOU
+}
+
+list_hosts() {
+  [ -d "$CONFIG_DIR" ] || return 0
+  for f in "$CONFIG_DIR"/*.env; do
+    [ -e "$f" ] || continue
+    basename "$f" .env
+  done
+}
+
+load_config() {
+  local host="$1" cfg="$CONFIG_DIR/$1.env"
+  [ -f "$cfg" ] || die "Host '$host' not configured. Expected: $cfg\nRun: oc-remote init $host"
+  set -a
+  # shellcheck disable=SC1090
+  . "$cfg"
+  set +a
+  HOST="$host"
+  SSH_HOST="${SSH_HOST:-$host}"
+  LOCAL_PORT="${LOCAL_PORT:-7096}"
+  REMOTE_PORT="${REMOTE_PORT:-7096}"
+  REMOTE_OPENCODE="${REMOTE_OPENCODE:-$HOME/.opencode/bin/opencode}"
+  REMOTE_DIRECTORY="${REMOTE_DIRECTORY:-$HOME}"
+  [ -n "${OPENCODE_PASSWORD:-}" ] || die "OPENCODE_PASSWORD is missing in $cfg"
+  CTL_PATH="$CTL_DIR/$host.ctl"
+}
+
+auth_header() {
+  printf 'Authorization: Basic %s' "$(printf 'opencode:%s' "$OPENCODE_PASSWORD" | base64 | tr -d '\n')"
+}
+
+health_code() {
+  curl -s -o /dev/null -m 4 -w '%{http_code}' \
+    -H "$(auth_header)" \
+    "http://127.0.0.1:${LOCAL_PORT}/api/info" 2>/dev/null || printf '000'
+}
+
+port_listen() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -tln 2>/dev/null | grep -qE "[:.]${LOCAL_PORT}[[:space:]]"
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -i ":${LOCAL_PORT}" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    curl -s -o /dev/null -m 1 "http://127.0.0.1:${LOCAL_PORT}/api/info" 2>/dev/null
+  fi
+}
+
+our_tunnel() {
+  [ -S "$CTL_PATH" ] && ssh -S "$CTL_PATH" -O check "$SSH_HOST" >/dev/null 2>&1
+}
+
+open_browser() {
+  local url="$1"
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+  elif command -v open >/dev/null 2>&1; then
+    open "$url" >/dev/null 2>&1 &
+  else
+    info "Please open in browser: $url"
+  fi
+}
+
+# ------------------------------------------------------- infrastructure -----
+
+require_ssh() {
+  step "Checking SSH connection to $SSH_HOST…"
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" true 2>/dev/null \
+    || die "Cannot connect to '$SSH_HOST' via SSH (BatchMode/ConnectTimeout).\nTest with: ssh $SSH_HOST"
+}
+
+remote_status() {
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
+    "$REMOTE_OPENCODE service status" 2>/dev/null
+}
+
+ensure_service() {
+  local out i
+  if out=$(remote_status) && printf '%s' "$out" | grep -q '^http'; then
+    step "Remote OpenCode service is active ($out)"
+    return 0
+  fi
+  step "Starting remote OpenCode service ($REMOTE_OPENCODE service start)…"
+  ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
+    "$REMOTE_OPENCODE service start" >&2 || die "Failed to start OpenCode service on remote host"
+  for i in $(seq 1 30); do
+    if out=$(remote_status) && printf '%s' "$out" | grep -q '^http'; then
+      step "Remote service started ($out)"
+      return 0
+    fi
+    sleep 1
+  done
+  die "Remote OpenCode service did not report ready within 30 seconds"
+}
+
+ensure_tunnel() {
+  local code i
+  code=$(health_code)
+  if [ "$code" = "200" ]; then
+    step "SSH tunnel OK (127.0.0.1:$LOCAL_PORT is responsive)"
+    return 0
+  fi
+
+  if port_listen; then
+    case "$code" in
+      401) die "Port $LOCAL_PORT responded, but authentication failed (401 Unauthorized).\nCheck OPENCODE_PASSWORD in $CONFIG_DIR/$HOST.env" ;;
+      *)   die "Port $LOCAL_PORT is already in use by another process and is not responding to OpenCode" ;;
+    esac
+  fi
+
+  if [ -S "$CTL_PATH" ]; then
+    ssh -S "$CTL_PATH" -O exit "$SSH_HOST" >/dev/null 2>&1 || true
+    rm -f "$CTL_PATH"
+  fi
+
+  step "Opening SSH tunnel 127.0.0.1:$LOCAL_PORT -> remote:$REMOTE_PORT ($SSH_HOST)…"
+  ssh -M -S "$CTL_PATH" -f -N \
+    -o ExitOnForwardFailure=yes \
+    -o BatchMode=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -L "${LOCAL_PORT}:127.0.0.1:${REMOTE_PORT}" \
+    "$SSH_HOST" || die "Failed to open SSH tunnel (is port $LOCAL_PORT already bound?)"
+
+  for i in $(seq 1 20); do
+    [ "$(health_code)" = "200" ] && { step "SSH tunnel established and verified"; return 0; }
+    sleep 0.5
+  done
+  die "SSH tunnel process launched but /api/info did not return HTTP 200"
+}
+
+ensure_all() {
+  require_ssh
+  ensure_service
+  ensure_tunnel
+}
+
+close_tunnel() {
+  if our_tunnel; then
+    step "Tearing down SSH tunnel for $HOST…"
+    ssh -S "$CTL_PATH" -O exit "$SSH_HOST" >/dev/null 2>&1 || true
+    rm -f "$CTL_PATH"
+    info "Tunnel closed."
+  elif port_listen; then
+    info "Port $LOCAL_PORT is active but was not started by this session manager."
+  else
+    info "No active tunnel found for $HOST."
+  fi
+}
+
+# ------------------------------------------------------------ commands ------
+
+cmd_status() {
+  local code svc tnl
+  printf '\n\033[1mOpenCode Remote Diagnostics\033[0m\n'
+  printf 'host        %s\n' "$HOST"
+  printf 'ssh         %s\n' "$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" true >/dev/null 2>&1 && echo -e '\033[32mok\033[0m' || echo -e '\033[31mFAILED\033[0m')"
+
+  if svc=$(remote_status) && printf '%s' "$svc" | grep -q '^http'; then
+    printf 'service     \033[32mactive\033[0m  %s\n' "$svc"
+  else
+    printf 'service     \033[33mSTOPPED\033[0m (run: oc-remote up %s)\n' "$HOST"
+  fi
+
+  if port_listen; then tnl="LISTENING"; else tnl="CLOSED"; fi
+  printf 'tunnel      %s  127.0.0.1:%s' "$tnl" "$LOCAL_PORT"
+  our_tunnel && printf '  (managed by oc-remote)'
+  printf '\n'
+
+  code=$(health_code)
+  case "$code" in
+    200) printf 'auth/api    \033[32m200 OK\033[0m (authenticated successfully)\n' ;;
+    401) printf 'auth/api    \033[31m401 UNAUTHORIZED\033[0m (password in .env is incorrect)\n' ;;
+    000) printf 'auth/api    \033[33mNO RESPONSE\033[0m (tunnel or remote service is down)\n' ;;
+    *)   printf 'auth/api    \033[33mHTTP %s\033[0m\n' "$code" ;;
+  esac
+  printf 'launch      oc-remote %s\n\n' "$HOST"
+}
+
+cmd_link() {
+  ensure_all
+  local link
+  link=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
+    "$REMOTE_OPENCODE pair --url http://127.0.0.1:${LOCAL_PORT}" 2>/dev/null \
+    | grep -Eo 'http://[^ ]+/connect#[^ ]+' | tail -1)
+  [ -n "$link" ] || die "Could not generate pairing link from 'opencode pair'"
+  printf '%s\n' "$link"
+}
+
+cmd_web() {
+  ensure_all
+  step "Generating pairing authentication link…"
+  local link
+  link=$(ssh -o BatchMode=yes -o ConnectTimeout=8 "$SSH_HOST" \
+    "$REMOTE_OPENCODE pair --url http://127.0.0.1:${LOCAL_PORT}" 2>/dev/null \
+    | grep -Eo 'http://[^ ]+/connect#[^ ]+' | tail -1)
+  [ -n "$link" ] || die "Could not generate pairing link from 'opencode pair'"
+  step "Launching browser…"
+  open_browser "$link"
+  info "$link"
+}
+
+cmd_init() {
+  local host="$1"
+  local target="$CONFIG_DIR/$host.env"
+  mkdir -p "$CONFIG_DIR"
+  if [ -f "$target" ]; then
+    die "Configuration already exists: $target"
+  fi
+
+  printf '\033[1mConfiguring new remote host: %s\033[0m\n' "$host"
+  printf 'SSH Host (as in ~/.ssh/config or user@host) [%s]: ' "$host"
+  read -r in_ssh
+  in_ssh="${in_ssh:-$host}"
+
+  printf 'Local Port to forward to [7096]: '
+  read -r in_lport
+  in_lport="${in_lport:-7096}"
+
+  printf 'Remote OpenCode binary path [~/.opencode/bin/opencode]: '
+  read -r in_bin
+  in_bin="${in_bin:-~/.opencode/bin/opencode}"
+
+  printf 'Remote working directory [~]: '
+  read -r in_dir
+  in_dir="${in_dir:-~}"
+
+  printf 'Remote OpenCode service password: '
+  read -rs in_pass
+  printf '\n'
+  [ -n "$in_pass" ] || die "Password cannot be empty"
+
+  cat > "$target" <<EOFC
+# OpenCode remote configuration for '$host'
+SSH_HOST=$in_ssh
+LOCAL_PORT=$in_lport
+REMOTE_PORT=7096
+REMOTE_OPENCODE=$in_bin
+REMOTE_DIRECTORY=$in_dir
+OPENCODE_PASSWORD=$in_pass
+EOFC
+  chmod 600 "$target"
+  step "Created $target (chmod 600)"
+  info "Test with: oc-remote status $host"
+  info "Connect with: oc-remote $host"
+}
+
+cmd_tui() {
+  ensure_all
+  step "Connecting OpenCode TUI to http://127.0.0.1:${LOCAL_PORT} ($SSH_HOST)…"
+  export OPENCODE_PASSWORD
+  local url="http://127.0.0.1:${LOCAL_PORT}"
+
+  if [ ${#OPENCODE_ARGS[@]} -eq 0 ]; then
+    exec opencode --server "$url" "$REMOTE_DIRECTORY"
+  else
+    exec opencode --server "$url" "${OPENCODE_ARGS[@]}"
+  fi
+}
+
+# ------------------------------------------------------------------ main ----
+
+case "${1:-}" in
+  ""|-h|--help|help)
+    usage
+    exit 0
+    ;;
+  version|--version|-v)
+    printf 'oc-remote version %s\n' "$VERSION"
+    exit 0
+    ;;
+  list)
+    printf 'Configured hosts in %s:\n' "$CONFIG_DIR"
+    list_hosts | sed 's/^/  - /'
+    exit 0
+    ;;
+  init)
+    shift
+    [ -n "${1:-}" ] || die "Usage: oc-remote init <host>"
+    cmd_init "$1"
+    exit 0
+    ;;
+  up|down|status|web|link)
+    CMD="$1"
+    shift
+    ;;
+esac
+
+HOST="${1:-}"
+[ -n "$HOST" ] || { usage; exit 1; }
+shift
+OPENCODE_ARGS=("$@")
+
+load_config "$HOST"
+
+case "$CMD" in
+  up)     ensure_all; info "Ready." ;;
+  down)   close_tunnel ;;
+  status) cmd_status ;;
+  web)    cmd_web ;;
+  link)   cmd_link ;;
+  tui)    cmd_tui ;;
+esac

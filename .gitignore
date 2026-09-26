@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+*.ctl
+.cache/
+*.tmp
+.DS_Store
+
+# Don't commit active host secrets
+*.env
+!templates/example.env
