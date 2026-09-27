@@ -1,16 +1,16 @@
 {
   "name": "opencode-remote",
-  "version": "0.1.1",
-  "description": "Seamless remote development with OpenCode over SSH tunnels with service lifecycle and TUI integration",
-  "type": "module",
-  "main": "src/index.ts",
+  "version": "0.2.0",
+  "description": "Remote host management & automation CLI tool for OpenCode over SSH",
+  "main": "bin/opencode-remote",
   "bin": {
+    "opencode-remote": "bin/opencode-remote",
     "oc-remote": "bin/oc-remote"
   },
   "files": [
     "bin",
-    "src",
-    "templates",
+    "skills",
+    ".opencode",
     "install.sh"
   ],
   "scripts": {
@@ -18,11 +18,10 @@
   },
   "keywords": [
     "opencode",
-    "opencode-plugin",
+    "opencode-skill",
     "remote-development",
     "ssh",
     "tunnel",
-    "tui",
     "developer-tools"
   ],
   "author": "berndof <bernardofb@gmail.com>",
