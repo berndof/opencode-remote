@@ -28,8 +28,9 @@ mkdir -p "$LOCAL_BIN" "$SKILLS_DIR_CONFIG" "$SKILLS_DIR_LEGACY" "$PLUGIN_DIR"
 
 # 2. Install opencode-remote binary
 info "Installing opencode-remote executable to $LOCAL_BIN/opencode-remote..."
+rm -f "$LOCAL_BIN/opencode-remote"
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/bin/opencode-remote" ]; then
-  cp "$SCRIPT_DIR/bin/opencode-remote" "$LOCAL_BIN/opencode-remote"
+  cp -f "$SCRIPT_DIR/bin/opencode-remote" "$LOCAL_BIN/opencode-remote"
 else
   curl -fsSL "$REPO_RAW/bin/opencode-remote" -o "$LOCAL_BIN/opencode-remote"
 fi

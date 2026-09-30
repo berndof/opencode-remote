@@ -52,11 +52,20 @@ This installs `opencode-remote` with aliases (`ocd`, `oc-remote`) into `~/.local
 
 ## 📖 CLI Commands & Reference
 
-### 1. `ocd connect <host> [--dir <path>] [--port <port>]`
+### 1. `ocd connect <host> [--dir <path>] [--port <port>] [--sshfs] [--provision]`
 One-click connect: verifies SSH, spins up remote daemon, creates tunnel, resolves token, and connects client:
 ```bash
 ocd connect dev-server
 ocd connect dev-server --dir /home/user/my-project --port 7096
+
+# If the remote host lacks OpenCode, it automatically warns and falls back to SSHFS mount:
+ocd connect prod-server
+
+# Force direct SSHFS mount mode:
+ocd connect prod-server --sshfs /var/www/my-app
+
+# Auto-provision OpenCode headless and sync plugins to remote host:
+ocd connect dev-server --provision
 ```
 
 ### 2. `ocd mount <host> <remote_dir> [--as <name>]`
