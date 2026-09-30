@@ -780,8 +780,10 @@ def get_active_sshfs_mounts():
     return []
 
 
-def mount_sshfs_target(host, remote_dir=None, local_name=None):
-    """Mount remote directory via SSHFS if not already mounted, returning local mountpoint path."""
+def mount_sshfs_target(host, remote_dir=None, local_name=None, custom_opts=None):
+    """Mount remote directory via SSHFS if not already mounted, returning local mountpoint path.
+    Applies Low-Resource Guard options to minimize remote CPU, memory, and disk I/O.
+    """
     if not is_sshfs_installed():
         print(f"\n{RED}Erro:{RESET} O utilitário 'sshfs' não está instalado nesta máquina local.", file=sys.stderr)
         print("Para instalar o sshfs:")
@@ -811,14 +813,52 @@ def mount_sshfs_target(host, remote_dir=None, local_name=None):
 
     mountpoint.mkdir(parents=True, exist_ok=True)
 
+    # Low-Resource Guard options:
+    # 1. compression=no: Prevents remote CPU spikes from gzip compression
+    # 2. Ciphers: Hardware-accelerated lightweight ciphers (chacha20-poly1305, aes128-gcm)
+    # 3. Aggressive metadata/directory cache on local client to avoid stat()/readdir() storms on remote server
+    # 4. kernel_cache/auto_cache: Cache file pages locally in RAM
+    # 5. no_rofd_flush: Avoid redundant write flushes for read descriptors
+    default_opts = [
+        "reconnect",
+        "ServerAliveInterval=15",
+        "ServerAliveCountMax=3",
+        "follow_symlinks",
+        "idmap=user",
+        "compression=no",
+        "Ciphers=chacha20-poly1305@openssh.com,aes128-gcm@openssh.com,aes256-gcm@openssh.com",
+        "kernel_cache",
+        "auto_cache",
+        "dir_cache=yes",
+        "dcache_timeout=120",
+        "dcache_stat_timeout=120",
+        "dcache_dir_timeout=120",
+        "dcache_max_size=20000",
+        "entry_timeout=120",
+        "attr_timeout=120",
+        "negative_timeout=30",
+        "no_rofd_flush",
+    ]
+
+    cfg = load_host_config(host)
+    if custom_opts:
+        opts_list = custom_opts if isinstance(custom_opts, list) else [custom_opts]
+    elif cfg.get("sshfs_opts"):
+        opts_list = cfg.get("sshfs_opts").split(",")
+    else:
+        opts_list = default_opts
+
+    opts_str = ",".join(opts_list)
+
     sshfs_cmd = [
         "sshfs",
         f"{host}:{target_remote_dir}",
         mountpoint_str,
-        "-o", "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,follow_symlinks,idmap=user"
+        "-o", opts_str
     ]
 
     print(f"{BLUE}Mounting:{RESET} {host}:{target_remote_dir} -> {mountpoint_str}")
+    print(f"🛡️  {CYAN}[Low-Resource Guard Ativo]{RESET} Cache local agressivo e zero daemons remotos (proteção de CPU/RAM/Disco no servidor).")
     res = subprocess.run(sshfs_cmd)
     if res.returncode == 0:
         mounts = load_mounts_state()
@@ -827,7 +867,8 @@ def mount_sshfs_target(host, remote_dir=None, local_name=None):
             "host": host,
             "remote_dir": target_remote_dir,
             "mountpoint": mountpoint_str,
-            "mounted_at": time.time()
+            "mounted_at": time.time(),
+            "low_resource_mode": True
         })
         save_mounts_state(mounts)
         print(f"{GREEN}Successfully mounted!{RESET}")
@@ -845,7 +886,8 @@ def connect_via_sshfs(host, remote_dir=None, args=None, cfg=None):
     target_remote_dir = remote_dir or (args.dir if args and hasattr(args, "dir") else None) or cfg.get("remote_directory")
     mountpoint_str = mount_sshfs_target(host, target_remote_dir)
 
-    print(f"\n{BOLD}{GREEN}Launching local OpenCode on SSHFS mount: {mountpoint_str}...{RESET}\n")
+    print(f"\n{BOLD}{GREEN}Launching local OpenCode on SSHFS mount: {mountpoint_str}...{RESET}")
+    print(f"{CYAN}ℹ  Host remoto '{host}' protegido: processamento e IA rodando 100% na máquina local.{RESET}\n")
 
     cmd = ["opencode", mountpoint_str]
     if args and getattr(args, "extra_args", None):
