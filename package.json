@@ -1,16 +1,18 @@
 {
   "name": "opencode-remote",
-  "version": "0.2.0",
-  "description": "Remote host management & automation CLI tool for OpenCode over SSH",
+  "version": "0.3.0",
+  "description": "Remote host management, SSHFS mounts, tunnels & TUI automation for OpenCode over SSH",
   "main": "bin/opencode-remote",
   "bin": {
     "opencode-remote": "bin/opencode-remote",
+    "ocd": "bin/ocd",
     "oc-remote": "bin/oc-remote"
   },
   "files": [
     "bin",
     "skills",
     ".opencode",
+    "src",
     "install.sh"
   ],
   "scripts": {
@@ -21,6 +23,7 @@
     "opencode-skill",
     "remote-development",
     "ssh",
+    "sshfs",
     "tunnel",
     "developer-tools"
   ],
@@ -33,5 +36,10 @@
   "bugs": {
     "url": "https://github.com/berndof/opencode-remote/issues"
   },
-  "homepage": "https://github.com/berndof/opencode-remote#readme"
+  "homepage": "https://github.com/berndof/opencode-remote#readme",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "solid-js": "^1.8.15",
+    "typescript": "^5.3.3"
+  }
 }

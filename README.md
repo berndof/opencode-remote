@@ -1,26 +1,32 @@
 # opencode-remote 🚀
 
-> Remote host management and automation CLI tool for OpenCode.
+> Remote host management, SSHFS mounts, tunnels & TUI automation for OpenCode over SSH.
 
-`opencode-remote` enables OpenCode agents and developers to list, provision, synchronize, execute commands on, and tunnel to remote SSH hosts seamlessly.
+`opencode-remote` (and alias `ocd`) equips OpenCode developers and agents to connect, mount, provision, sync, execute commands on, and tunnel to remote SSH hosts seamlessly.
 
 ---
 
-## 🚀 Features & Operational Modes
+## 🌟 Key Features & Operational Modes
 
-`opencode-remote` supports two primary operational workflows:
+1. **⚡ One-Click Unified Connect (`ocd connect <host>`):**
+   - Automatically checks SSH connectivity.
+   - Starts the background `opencode serve` daemon on the remote server if needed.
+   - Establishes and validates the local SSH port tunnel (`localhost:4096` or custom port).
+   - Resolves server authentication token / password (from `~/.config/opencode/remote/<host>.env` or logs).
+   - Launches OpenCode TUI directly connected to the remote instance!
 
-1. **Zero-Footprint Mode (SSH Controller):**
-   - Execute remote commands over SSH.
-   - Synchronize local codebase directories with target remote hosts via `rsync`.
-   - Inspect SSH host availability concurrently.
+2. **📁 SSHFS Mount Mode (`ocd mount <host> <remote_dir>`):**
+   - Mounts remote codebases locally under `~/.cache/opencode-remote/mounts/<host>/`.
+   - Allows using local LLM models, local MCP servers, and local extensions while directly editing remote files in real time.
 
-2. **Remote OpenCode Provisioner & Daemon Mode:**
-   - Headlessly provision OpenCode on remote Linux hosts.
-   - Launch background `opencode serve` daemons.
-   - Establish secure SSH local port forwarding (`localhost:4096`).
-   - Monitor connection health, service states, and active local tunnels.
-   - Cleanly terminate services and local port forwards.
+3. **🎮 Interactive TUI Plugin & Slash Command (`/remote`):**
+   - OpenCode TUI interface for selecting servers, checking status, mounting folders, and toggling SSH services.
+   - Persistent prompt footer status indicator (`🌐 host` / `💻 local`).
+
+4. **🔄 Zero-Footprint & SSH Automation Mode:**
+   - Execute commands directly on remote hosts via SSH multiplexing.
+   - Fast incremental directory synchronization with `rsync`.
+   - Check host reachability across all entries in `~/.ssh/config`.
 
 ---
 
@@ -40,93 +46,74 @@ cd opencode-remote
 ./install.sh
 ```
 
-This installs `opencode-remote` (and alias `oc-remote`) into `~/.local/bin/` and registers the OpenCode skill definition in `~/.opencode/skills/opencode-remote/SKILL.md`.
+This installs `opencode-remote` with aliases (`ocd`, `oc-remote`) into `~/.local/bin/`, installs the skill into `~/.config/opencode/skills/` and `~/.opencode/skills/`, and deploys the TUI plugin to `~/.config/opencode/plugins/remote/`.
 
 ---
 
 ## 📖 CLI Commands & Reference
 
-### 1. `opencode-remote list`
-Parses `~/.ssh/config` and concurrently tests SSH connectivity to all configured hosts.
-
+### 1. `ocd connect <host> [--dir <path>] [--port <port>]`
+One-click connect: verifies SSH, spins up remote daemon, creates tunnel, resolves token, and connects client:
 ```bash
-# Standard table output
-opencode-remote list
-
-# JSON format output for agent integration
-opencode-remote list --json
-
-# Custom SSH timeout in seconds
-opencode-remote list --timeout 5
+ocd connect dev-server
+ocd connect dev-server --dir /home/user/my-project --port 7096
 ```
 
-### 2. `opencode-remote exec <host> <command...>`
-Executes remote commands on target host using SSH session.
-
+### 2. `ocd mount <host> <remote_dir> [--as <name>]`
+Mounts a remote directory locally via SSHFS:
 ```bash
-opencode-remote exec dev-server "docker ps"
-opencode-remote exec dev-server "uname -a"
+ocd mount dev-server /var/www/my-app
+ocd mounts            # List active mounts
+ocd unmount dev-server # Unmount
 ```
 
-### 3. `opencode-remote sync <host> <local_dir> <remote_dir>`
-Synchronizes local directory to target remote host via `rsync` (excludes `.git` and `node_modules` by default).
-
+### 3. `ocd list`
+Parses `~/.ssh/config` and tests SSH connectivity concurrently:
 ```bash
-# Basic sync
-opencode-remote sync dev-server ./my-app /var/www/my-app
-
-# Sync with --delete and --dry-run flags
-opencode-remote sync dev-server ./my-app /var/www/my-app --delete --dry-run
+ocd list
+ocd list --json
 ```
 
-### 4. `opencode-remote provision <host>`
-Installs OpenCode headlessly on target remote machine if not already installed.
-
+### 4. `ocd status <host> [--port 4096]`
+Comprehensive health check: SSH connection, remote daemon process, local tunnel state, and server token:
 ```bash
-opencode-remote provision dev-server
+ocd status dev-server
 ```
 
-### 5. `opencode-remote serve <host> [--port 4096]`
-Launches `opencode serve --port <port>` as a background daemon on the remote host (logs to `~/.opencode-serve.log`).
-
+### 5. `ocd exec <host> "<command>"`
+Runs commands directly on the remote host:
 ```bash
-opencode-remote serve dev-server --port 4096
+ocd exec dev-server "docker ps"
+ocd exec dev-server "git status"
 ```
 
-### 6. `opencode-remote tunnel <host> [--port 4096]`
-Sets up background SSH local port forwarding (`localhost:<port>` -> `127.0.0.1:<port>` on remote host).
-
+### 6. `ocd sync <host> <local_dir> <remote_dir>`
+Syncs local directory to remote host via `rsync`:
 ```bash
-opencode-remote tunnel dev-server --port 4096
+ocd sync dev-server ./my-app /var/www/my-app --delete
 ```
 
-### 7. `opencode-remote status <host> [--port 4096]`
-Displays connection diagnostic report:
-1. SSH host reachability
-2. Remote `opencode serve` daemon status
-3. Local SSH tunnel state and PID
-
+### 7. `ocd provision <host>`
+Installs OpenCode headlessly on the remote Linux host:
 ```bash
-opencode-remote status dev-server
+ocd provision dev-server
 ```
 
-### 8. `opencode-remote stop <host> [--port 4096]`
-Terminates local SSH tunnel process and cleanly stops remote `opencode serve` process.
-
+### 8. `ocd stop <host> [--port 4096]`
+Terminates local SSH tunnel process and cleanly shuts down remote `opencode serve` daemon:
 ```bash
-opencode-remote stop dev-server
+ocd stop dev-server
 ```
 
 ---
 
-## 🤖 OpenCode Skill Integration
+## 🤖 OpenCode Skill & TUI Integration
 
-This repository includes an OpenCode Skill definition at `.opencode/skills/opencode-remote/SKILL.md`.
-
-When enabled, OpenCode agents can automatically invoke `opencode-remote` to manage remote environments, sync files, and verify connection health before executing tasks.
+- **Skill:** Available at `skills/opencode-remote/SKILL.md`. Automatically enables agents to perform remote operations safely.
+- **TUI Plugin:** Slash command `/remote` (or `/rem`, `/remoto`) opens an interactive menu for server management, SSHFS mounts, and status checks.
 
 ---
 
 ## 📄 License
 
-MIT License © [berndof](https.github.com/berndof)
+MIT License © [berndof](https://github.com/berndof)

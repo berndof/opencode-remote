@@ -1,9 +1,4 @@
-import { Plugin } from "@opencode/plugin"
-
-export default Plugin.define({
+export default {
   id: "opencode.remote",
-  setup() {
-    // OpenCode Remote Server hooks (reserved for server-side telemetry or multi-host routing)
-    return () => {}
-  },
-})
+  setup: async () => {},
+}
