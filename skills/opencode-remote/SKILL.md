@@ -17,10 +17,15 @@ This skill equips OpenCode agents with capabilities to interact with remote host
 All commands are accessible via `opencode-remote` CLI installed in `~/.local/bin/opencode-remote` (and `ocd` alias).
 
 ### 1. One-Click Unified Connect (Recommended)
-Automatically verifies SSH, starts remote daemon if needed, establishes local tunnel, resolves server password, and connects OpenCode client:
+Automatically verifies SSH, starts remote daemon if needed, establishes local tunnel, resolves server password, and connects OpenCode client.
+- If the remote host does not have OpenCode installed, automatically falls back to mounting via SSHFS with a clear warning:
 ```bash
 ocd connect <host>
-# With custom directory or port:
+# Force direct SSHFS mount mode (local OpenCode + remote files):
+ocd connect portal-prod --sshfs /var/www/portal
+# Auto-provision OpenCode headless and sync plugins to remote host:
+ocd connect portal-dev --provision
+# Custom directory or port:
 ocd connect portal-dev --dir /home/bernardo --port 7096
 ```
 

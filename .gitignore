@@ -9,3 +9,7 @@ dist/
 # Don't commit active host secrets
 *.env
 !templates/example.env
+
+# Python
+__pycache__/
+*.pyc
