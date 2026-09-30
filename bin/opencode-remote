@@ -553,6 +553,27 @@ def clean_password_token(pwd):
     return pwd
 
 
+def get_remote_default_dir(host):
+    """Retrieve remote user's home/working directory via SSH or cache."""
+    tunnel_file = TUNNELS_DIR / f"{host}.json"
+    if tunnel_file.exists():
+        try:
+            data = json.loads(tunnel_file.read_text())
+            if data.get("remote_home"):
+                return data["remote_home"]
+        except Exception:
+            pass
+
+    try:
+        res = ssh_run(host, 'printf "%s" "$HOME"', timeout=6, interactive=False)
+        out = (res.stdout or "").strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    return "~"
+
+
 def get_remote_server_password(host, cfg=None):
     """Retrieve password from remote log, host config, or saved tunnel metadata."""
     # 1. Try querying remote log for live server password first (most accurate)
@@ -966,6 +987,7 @@ def cmd_serve(args):
         'if [ -z "$OC_BIN" ]; then echo "ERR:NO_BINARY"; exit 3; fi; '
         f'echo "BIN=$OC_BIN"; '
         f'if {remote_port_listening_cmd(port)}; then echo "RESULT:ALREADY_LISTENING"; exit 0; fi; '
+        f'cd "$HOME" 2>/dev/null || true; '
         f'{env_prefix}nohup "$OC_BIN" serve --port {port} > "$HOME/.opencode-serve.log" 2>&1 & '
         'sleep 3; '
         f'if {remote_port_listening_cmd(port)}; then echo "RESULT:STARTED"; '
@@ -992,7 +1014,12 @@ def cmd_serve(args):
                 data = json.loads(tunnel_file.read_text())
             except Exception:
                 pass
-        data.update({"host": host, "remote_port": port, "password": actual_pwd})
+        data.update({
+            "host": host,
+            "remote_port": port,
+            "password": actual_pwd,
+            "remote_home": get_remote_default_dir(host)
+        })
         tunnel_file.write_text(json.dumps(data, indent=2))
 
         print(f"{GREEN}OK: 'opencode serve' is listening on '{host}:{port}'.{RESET}")
@@ -1126,7 +1153,7 @@ def cmd_connect(args):
 
     default_local_port = cfg.get("local_port", 4096)
     local_port, _ = resolve_local_port(host, requested_port=args.port, default_port=default_local_port, remote_port=remote_port)
-    remote_dir = args.dir or cfg.get("remote_directory") or ""
+    remote_dir = args.dir or cfg.get("remote_directory") or get_remote_default_dir(host)
     password = getattr(args, "password", None) or cfg.get("opencode_password")
 
     # If --sshfs or --mount was passed explicitly, branch immediately to SSHFS mode
