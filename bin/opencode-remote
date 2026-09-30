@@ -765,11 +765,8 @@ def save_mounts_state(mounts):
 
 
 def is_sshfs_installed():
-    try:
-        res = subprocess.run(["command", "-v", "sshfs"], capture_output=True, text=True, shell=True)
-        return res.returncode == 0 and bool(res.stdout.strip())
-    except Exception:
-        return False
+    return bool(shutil.which("sshfs"))
+
 
 
 def get_active_sshfs_mounts():
