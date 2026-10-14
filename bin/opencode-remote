@@ -7,6 +7,7 @@ import sys
 import os
 import re
 import getpass
+import shlex
 import shutil
 import argparse
 import subprocess
@@ -33,6 +34,7 @@ GREEN = "\033[92m" if USE_COLORS else ""
 RED = "\033[91m" if USE_COLORS else ""
 YELLOW = "\033[93m" if USE_COLORS else ""
 BLUE = "\033[94m" if USE_COLORS else ""
+CYAN = "\033[96m" if USE_COLORS else ""
 BOLD = "\033[1m" if USE_COLORS else ""
 RESET = "\033[0m" if USE_COLORS else ""
 
@@ -84,7 +86,7 @@ def parse_ssh_config(config_path=None):
         return []
 
     hosts = []
-    current_host = None
+    current_hosts = []
 
     with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -92,7 +94,10 @@ def parse_ssh_config(config_path=None):
             if not line or line.startswith("#"):
                 continue
 
-            parts = line.split(None, 1)
+            if "=" in line and " " not in line.split("=", 1)[0]:
+                parts = line.split("=", 1)
+            else:
+                parts = line.split(None, 1)
             if len(parts) < 2:
                 continue
 
@@ -100,25 +105,27 @@ def parse_ssh_config(config_path=None):
             val = parts[1].strip()
 
             if key == "host":
+                current_hosts = []
                 host_names = val.split()
                 for hn in host_names:
-                    if "*" in hn or "?" in hn:
-                        current_host = None
+                    if "*" in hn or "?" in hn or hn.startswith("!"):
                         continue
-                    current_host = {
+                    h_dict = {
                         "host": hn,
                         "hostname": hn,
                         "user": "-",
                         "port": "22"
                     }
-                    hosts.append(current_host)
-            elif current_host is not None:
-                if key == "hostname":
-                    current_host["hostname"] = val
-                elif key == "user":
-                    current_host["user"] = val
-                elif key == "port":
-                    current_host["port"] = val
+                    current_hosts.append(h_dict)
+                    hosts.append(h_dict)
+            elif current_hosts:
+                for h in current_hosts:
+                    if key == "hostname":
+                        h["hostname"] = val
+                    elif key == "user":
+                        h["user"] = val
+                    elif key == "port":
+                        h["port"] = val
 
     seen = set()
     unique_hosts = []
@@ -164,6 +171,7 @@ def load_host_config(host):
                 elif k == "REMOTE_PORT":
                     try:
                         cfg["remote_port"] = int(v)
+                        cfg["remote_port_set"] = True
                     except ValueError:
                         pass
                 elif k == "REMOTE_OPENCODE":
@@ -174,32 +182,41 @@ def load_host_config(host):
                     cfg["opencode_password"] = v
                 elif k in ("CLOSE_TUNNEL_ON_EXIT", "AUTO_CLOSE_TUNNEL"):
                     cfg["close_tunnel_on_exit"] = v.lower() in ("true", "1", "yes")
+                elif k == "SSHFS_OPTS":
+                    cfg["sshfs_opts"] = v
     except Exception:
         pass
     return cfg
 
 
+def ssh_target(host):
+    """Return SSH target host/alias from ~/.config/opencode/remote/<host>.env (SSH_HOST) or host itself."""
+    return load_host_config(host).get("ssh_host") or host
+
+
+def resolve_remote_port(cfg, cli_port=None):
+    """Remote port: REMOTE_PORT from .env wins; otherwise --port applies to both ends."""
+    if cli_port is not None and not cfg.get("remote_port_set"):
+        return cli_port
+    return cfg.get("remote_port", 4096)
+
+
 def check_ssh_host_detailed(host, timeout=3, interactive=False):
-    cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={timeout}",
-        "-o", "StrictHostKeyChecking=accept-new",
-        host,
-        "true"
-    ]
+    target = ssh_target(host)
+    pw = _HOST_PASSWORDS.get(host)
+    cmd = ["ssh"] + ssh_opts(host, ctl=True, batch=True, connect_timeout=timeout) + [target, "true"]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 2)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 3, env=ssh_env(pw))
         if res.returncode == 0:
             return True, "ONLINE"
         err = ((res.stderr or "") + (res.stdout or "")).lower()
-        if "permission denied" in err:
+        if "permission denied" in err or "publickey" in err:
             # No usable key: optionally prompt for the password (TTY only),
             # validate it and cache the connection via ControlMaster.
             if interactive and sys.stdin.isatty() and prompt_ssh_password(host):
                 try:
                     res2 = subprocess.run(
-                        ["ssh"] + ssh_opts(host, ctl=True, batch=False) + [host, "true"],
+                        ["ssh"] + ssh_opts(host, ctl=True, batch=False, connect_timeout=timeout + 5) + [target, "true"],
                         capture_output=True, text=True, timeout=timeout + 10,
                         env=ssh_env(_HOST_PASSWORDS.get(host)),
                     )
@@ -266,8 +283,8 @@ def ssh_env(password=None):
     return env
 
 
-def ssh_opts(host, ctl=True, batch=False):
-    opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5"]
+def ssh_opts(host, ctl=True, batch=False, connect_timeout=5):
+    opts = ["-o", "StrictHostKeyChecking=accept-new", "-o", f"ConnectTimeout={connect_timeout}"]
     if ctl:
         try:
             CTL_DIR.mkdir(parents=True, exist_ok=True)
@@ -287,7 +304,8 @@ def ssh_run(host, remote_cmd, *, ctl=True, capture=True, timeout=15, interactive
     """Run a remote command. Falls back to an interactive password prompt when
     key auth is refused (only if stdin is a TTY). Returns CompletedProcess."""
     pw = _HOST_PASSWORDS.get(host)
-    cmd = ["ssh"] + ssh_opts(host, ctl=ctl, batch=not pw) + [host, remote_cmd]
+    target = ssh_target(host)
+    cmd = ["ssh"] + ssh_opts(host, ctl=ctl, batch=not pw) + [target, remote_cmd]
     try:
         res = subprocess.run(cmd, capture_output=capture, text=True,
                              timeout=timeout, env=ssh_env(pw))
@@ -308,6 +326,7 @@ def prompt_ssh_password(host):
         return True
     if not sys.stdin.isatty():
         return False
+    target = ssh_target(host)
     print(f"\n{YELLOW}Host '{host}' recusou a chave SSH (sem chave instalada).{RESET}")
     try:
         pw = getpass.getpass(f"Senha SSH para {host}: ")
@@ -319,7 +338,7 @@ def prompt_ssh_password(host):
     _HOST_PASSWORDS[host] = pw
     try:
         res = subprocess.run(
-            ["ssh"] + ssh_opts(host, ctl=True, batch=False) + [host, "true"],
+            ["ssh"] + ssh_opts(host, ctl=True, batch=False) + [target, "true"],
             capture_output=True, text=True, timeout=15, env=ssh_env(pw),
         )
     except Exception:
@@ -338,7 +357,7 @@ def close_ssh_master(host):
     try:
         sock = _ctl_socket(host)
         if os.path.exists(sock):
-            subprocess.run(["ssh", "-o", f"ControlPath={sock}", "-O", "exit", host],
+            subprocess.run(["ssh", "-o", f"ControlPath={sock}", "-O", "exit", ssh_target(host)],
                            capture_output=True, timeout=10)
     except Exception:
         pass
@@ -355,37 +374,39 @@ def is_process_running(pid):
 
 
 def get_ssh_tunnel_pid(host, port):
+    """PID of the local *ssh* process LISTENING on <port> (never another program)."""
     try:
         res = subprocess.run(
-            ["lsof", "-ti", f":{port}"],
+            ["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
             capture_output=True,
             text=True
         )
         if res.returncode == 0 and res.stdout.strip():
-            pids = res.stdout.strip().split()
-            for p in pids:
+            for p in res.stdout.strip().split():
                 try:
                     pid_int = int(p)
                     p_info = subprocess.run(["ps", "-p", str(pid_int), "-o", "comm="], capture_output=True, text=True)
-                    if "ssh" in p_info.stdout.lower():
+                    if p_info.stdout.strip().lower() == "ssh":
                         return pid_int
                 except Exception:
                     pass
-            return int(pids[0])
+            return None
     except Exception:
         pass
 
-    try:
-        res = subprocess.run(
-            ["pgrep", "-f", f"ssh.*-L.*{port}:127.0.0.1:.*{host}"],
-            capture_output=True,
-            text=True
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            pids = res.stdout.strip().split()
-            return int(pids[0])
-    except Exception:
-        pass
+    target = ssh_target(host)
+    for h_cand in ({host, target}):
+        try:
+            res = subprocess.run(
+                ["pgrep", "-f", f"ssh.*-L.*{port}:127.0.0.1:.*{re.escape(h_cand)}"],
+                capture_output=True,
+                text=True
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                pids = res.stdout.strip().split()
+                return int(pids[0])
+        except Exception:
+            pass
     return None
 
 
@@ -411,7 +432,7 @@ def find_available_local_port(start_port=4096, max_attempts=100, host="127.0.0.1
 def resolve_local_port(host, requested_port=None, default_port=4096, remote_port=4096):
     """
     Determine the local port to use for the SSH tunnel.
-    If a healthy tunnel already exists for this host, reuse its local port.
+    If a healthy tunnel already exists for this host (matching requested_port/remote_port), reuse its local port.
     If requested_port is provided explicitly and in use, warn.
     If requested_port is None and default_port is in use by another session/process,
     auto-allocate the next free port and warn.
@@ -423,7 +444,14 @@ def resolve_local_port(host, requested_port=None, default_port=4096, remote_port
             data = json.loads(tunnel_file.read_text())
             saved_pid = data.get("pid")
             saved_local_port = data.get("local_port", data.get("port"))
-            if saved_local_port and saved_pid and is_process_running(saved_pid):
+            saved_remote_port = data.get("remote_port", remote_port)
+            if (
+                saved_local_port
+                and saved_pid
+                and is_process_running(saved_pid)
+                and (requested_port is None or requested_port == saved_local_port)
+                and saved_remote_port == remote_port
+            ):
                 ok, _ = probe_http(saved_local_port, timeout=1)
                 if ok:
                     return saved_local_port, False
@@ -432,7 +460,9 @@ def resolve_local_port(host, requested_port=None, default_port=4096, remote_port
 
     if requested_port is not None:
         if is_local_port_in_use(requested_port):
-            print(f"{YELLOW}⚠️  [Warning] Porta local {requested_port} já está em uso por outro processo ou túnel.{RESET}", file=sys.stderr)
+            existing_pid = get_ssh_tunnel_pid(host, requested_port)
+            if not existing_pid:
+                print(f"{YELLOW}⚠️  [Warning] Porta local {requested_port} já está em uso por outro processo ou túnel.{RESET}", file=sys.stderr)
         return requested_port, False
 
     if not is_local_port_in_use(default_port):
@@ -480,9 +510,11 @@ def remote_http_probe_cmd(port):
     """Remote shell snippet: real HTTP health probe (detects hung daemons that only accept TCP)."""
     url = f"http://127.0.0.1:{port}/"
     py = (
-        'python3 -c "import urllib.request as u\n'
+        'python3 -c "import urllib.request as u, urllib.error as ue\n'
         'try:\n'
         f"    u.urlopen('{url}', timeout=3); print('ALIVE')\n"
+        'except ue.HTTPError:\n'
+        "    print('ALIVE')\n"
         'except Exception as e:\n'
         '    print(type(e).__name__)\n'
         '    raise SystemExit\n"'
@@ -490,7 +522,7 @@ def remote_http_probe_cmd(port):
     return (
         'if command -v curl >/dev/null 2>&1; then '
         f'c=$(curl -s -o /dev/null -m 4 -w "%{{http_code}}" "{url}" 2>/dev/null || true); '
-        'case "$c" in [0-9][0-9][0-9]) echo "ALIVE";; *) echo "HTTP_FAIL:$c";; esac; '
+        'case "$c" in 000|"") echo "HTTP_FAIL:$c";; [0-9][0-9][0-9]) echo "ALIVE";; *) echo "HTTP_FAIL:$c";; esac; '
         'elif command -v python3 >/dev/null 2>&1; then '
         f'{py}; '
         'else echo "UNKNOWN"; fi'
@@ -559,7 +591,7 @@ def get_remote_default_dir(host):
     if tunnel_file.exists():
         try:
             data = json.loads(tunnel_file.read_text())
-            if data.get("remote_home"):
+            if data.get("remote_home") and data["remote_home"] != "~":
                 return data["remote_home"]
         except Exception:
             pass
@@ -571,7 +603,7 @@ def get_remote_default_dir(host):
             return out
     except Exception:
         pass
-    return "~"
+    return None
 
 
 def get_remote_server_password(host, cfg=None):
@@ -680,12 +712,20 @@ def cmd_list(args):
         ))
     print()
     if has_key_needed:
-        print(f"{YELLOW}💡 Dica:{RESET} Para hosts com '{YELLOW}KEY NEEDED{RESET}', configure a chave SSH pública com: {BOLD}ssh-copy-id <host>{RESET}\n")
+        print(f"{YELLOW}💡 Dica:{RESET} Para hosts com '{YELLOW}KEY NEEDED{RESET}', configure a chave SSH pública com: {BOLD}ocd copy-key <host>{RESET}\n")
 
 
 def cmd_exec(args):
-    cmd = ["ssh", args.host] + args.cmd
-    res = subprocess.run(cmd)
+    cmd_args = list(args.cmd or [])
+    if cmd_args and cmd_args[0] == "--":
+        cmd_args = cmd_args[1:]
+    if not cmd_args:
+        print(f"{RED}Error:{RESET} No command specified for 'exec'.", file=sys.stderr)
+        sys.exit(2)
+    target = ssh_target(args.host)
+    pw = _HOST_PASSWORDS.get(args.host)
+    cmd = ["ssh"] + ssh_opts(args.host, ctl=True, batch=False) + [target] + cmd_args
+    res = subprocess.run(cmd, env=ssh_env(pw))
     sys.exit(res.returncode)
 
 
@@ -698,7 +738,8 @@ def cmd_sync(args):
     if os.path.isdir(local_path) and not local_path.endswith("/"):
         local_path += "/"
 
-    remote_target = f"{args.host}:{args.remote_dir}"
+    target = ssh_target(args.host)
+    remote_target = f"{target}:{args.remote_dir}"
     rsync_cmd = ["rsync", "-avz", "--exclude", ".git", "--exclude", "node_modules"]
     if args.delete:
         rsync_cmd.append("--delete")
@@ -708,7 +749,7 @@ def cmd_sync(args):
 
     print(f"{BLUE}Syncing:{RESET} {local_path} -> {remote_target}")
     print(f"Executing: {' '.join(rsync_cmd)}")
-    res = subprocess.run(rsync_cmd)
+    res = subprocess.run(rsync_cmd, env=ssh_env(_HOST_PASSWORDS.get(args.host)))
     sys.exit(res.returncode)
 
 
@@ -722,11 +763,12 @@ def sync_opencode_environment(host):
     ssh_run(host, "mkdir -p ~/.config/opencode ~/.opencode/skills ~/.config/opencode/plugins", timeout=15)
 
     if shutil.which("rsync") is not None:
+        target = ssh_target(host)
         items_to_sync = ["plugins", "skills", "agents", "package.json", "opencode.json"]
         for item in items_to_sync:
             src_path = local_cfg / item
             if src_path.exists():
-                remote_target = f"{host}:~/.config/opencode/"
+                remote_target = f"{target}:~/.config/opencode/"
                 rsync_cmd = [
                     "rsync", "-avz",
                     "--exclude", "node_modules",
@@ -735,7 +777,7 @@ def sync_opencode_environment(host):
                     str(src_path),
                     remote_target
                 ]
-                subprocess.run(rsync_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(rsync_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ssh_env(_HOST_PASSWORDS.get(host)))
         print(f"{GREEN}OpenCode environment synced to '{host}:~/.config/opencode/'.{RESET}")
     else:
         print(f"{YELLOW}rsync not found locally; skipping automatic environment sync.{RESET}")
@@ -749,9 +791,10 @@ def provision_remote_host(host, sync_config=True):
         "echo 'OpenCode is already installed: '$(opencode --version 2>/dev/null || echo 'headless') "
         "|| (curl -fsSL https://opencode.ai/install.sh | bash || curl -fsSL https://raw.githubusercontent.com/sst/opencode/main/install.sh | bash)"
     )
-    cmd = ["ssh"] + ssh_opts(host, ctl=False) + [host, install_script]
+    target = ssh_target(host)
+    cmd = ["ssh"] + ssh_opts(host, ctl=False) + [target, install_script]
     try:
-        res = subprocess.run(cmd)
+        res = subprocess.run(cmd, env=ssh_env(_HOST_PASSWORDS.get(host)))
         if res.returncode != 0:
             print(f"{RED}Provisioning failed with exit code {res.returncode}.{RESET}", file=sys.stderr)
             return False
@@ -789,7 +832,6 @@ def is_sshfs_installed():
     return bool(shutil.which("sshfs"))
 
 
-
 def get_active_sshfs_mounts():
     try:
         res = subprocess.run(["mount"], capture_output=True, text=True)
@@ -799,6 +841,26 @@ def get_active_sshfs_mounts():
     except Exception:
         pass
     return []
+
+
+def is_mounted(mountpoint, active_mounts=None):
+    """Exact match of a mountpoint in `mount` output ("src on <mp> type ..." / "src on <mp> (...)")."""
+    if active_mounts is None:
+        active_mounts = get_active_sshfs_mounts()
+    needle = f" on {mountpoint} "
+    return any(needle in line for line in active_mounts)
+
+
+def unmount_path(mountpoint):
+    """Unmount a FUSE mountpoint using whatever tool is available. Returns CompletedProcess."""
+    res = None
+    for tool in (["fusermount3", "-u"], ["fusermount", "-u"], ["umount"]):
+        if not shutil.which(tool[0]):
+            continue
+        res = subprocess.run(tool + [mountpoint], capture_output=True, text=True)
+        if res.returncode == 0:
+            return res
+    return res or subprocess.CompletedProcess([], 1, "", "no unmount tool found")
 
 
 def mount_sshfs_target(host, remote_dir=None, local_name=None, custom_opts=None):
@@ -828,8 +890,7 @@ def mount_sshfs_target(host, remote_dir=None, local_name=None, custom_opts=None)
     mountpoint = MOUNT_BASE / host / local_name
     mountpoint_str = str(mountpoint)
 
-    active_mounts = get_active_sshfs_mounts()
-    if any(mountpoint_str in line for line in active_mounts):
+    if is_mounted(mountpoint_str):
         return mountpoint_str
 
     mountpoint.mkdir(parents=True, exist_ok=True)
@@ -870,17 +931,18 @@ def mount_sshfs_target(host, remote_dir=None, local_name=None, custom_opts=None)
         opts_list = default_opts
 
     opts_str = ",".join(opts_list)
+    target = ssh_target(host)
 
     sshfs_cmd = [
         "sshfs",
-        f"{host}:{target_remote_dir}",
+        f"{target}:{target_remote_dir}",
         mountpoint_str,
         "-o", opts_str
     ]
 
     print(f"{BLUE}Mounting:{RESET} {host}:{target_remote_dir} -> {mountpoint_str}")
     print(f"🛡️  {CYAN}[Low-Resource Guard Ativo]{RESET} Cache local agressivo e zero daemons remotos (proteção de CPU/RAM/Disco no servidor).")
-    res = subprocess.run(sshfs_cmd)
+    res = subprocess.run(sshfs_cmd, env=ssh_env(_HOST_PASSWORDS.get(host)))
     if res.returncode == 0:
         mounts = load_mounts_state()
         mounts = [m for m in mounts if m.get("mountpoint") != mountpoint_str]
@@ -911,8 +973,11 @@ def connect_via_sshfs(host, remote_dir=None, args=None, cfg=None):
     print(f"{CYAN}ℹ  Host remoto '{host}' protegido: processamento e IA rodando 100% na máquina local.{RESET}\n")
 
     cmd = ["opencode", mountpoint_str]
-    if args and getattr(args, "extra_args", None):
-        cmd.extend(args.extra_args)
+    extra = list(getattr(args, "extra_args", None) or []) if args else []
+    if extra and extra[0] == "--":
+        extra = extra[1:]
+    if extra:
+        cmd.extend(extra)
 
     exit_code = 0
     try:
@@ -928,10 +993,13 @@ def connect_via_sshfs(host, remote_dir=None, args=None, cfg=None):
     unmount_exit = getattr(args, "unmount_on_exit", False)
     if unmount_exit:
         print(f"{BLUE}Unmounting SSHFS directory for '{host}'...{RESET}")
-        subprocess.run(["fusermount", "-u", mountpoint_str], capture_output=True)
-        mounts = [m for m in load_mounts_state() if m.get("mountpoint") != mountpoint_str]
-        save_mounts_state(mounts)
-        print(f"{GREEN}Unmounted.{RESET}")
+        res = unmount_path(mountpoint_str)
+        if res.returncode == 0 or not is_mounted(mountpoint_str):
+            mounts = [m for m in load_mounts_state() if m.get("mountpoint") != mountpoint_str]
+            save_mounts_state(mounts)
+            print(f"{GREEN}Unmounted.{RESET}")
+        else:
+            print(f"{YELLOW}Could not unmount {mountpoint_str}: {(res.stderr or '').strip()}{RESET}", file=sys.stderr)
     else:
         print(f"\n{BLUE}[ℹ] Diretório montado mantido ativo em:{RESET} {BOLD}{mountpoint_str}{RESET}")
         print(f"    Para desmontar quando desejar: {BOLD}opencode-remote unmount {host}{RESET} (ou {BOLD}ocd unmount {host}{RESET})\n")
@@ -980,10 +1048,16 @@ def cmd_serve(args):
 
     env_prefix = ""
     if password:
-        env_prefix = f'export OPENCODE_SERVER_PASSWORD="{password}"; export OPENCODE_PASSWORD="{password}"; '
+        qp = shlex.quote(password)
+        env_prefix = f'export OPENCODE_SERVER_PASSWORD={qp}; export OPENCODE_PASSWORD={qp}; '
+
+    bin_override = 'OC_BIN=""; '
+    if cfg.get("remote_opencode"):
+        bin_override = f'OC_BIN={shlex.quote(cfg["remote_opencode"])}; [ -x "$OC_BIN" ] || OC_BIN=""; '
 
     remote_cmd = (
-        'OC_BIN="$(' + resolve_remote_opencode_bin() + ')"; '
+        bin_override +
+        '[ -n "$OC_BIN" ] || OC_BIN="$(' + resolve_remote_opencode_bin() + ')"; '
         'if [ -z "$OC_BIN" ]; then echo "ERR:NO_BINARY"; exit 3; fi; '
         f'echo "BIN=$OC_BIN"; '
         f'if {remote_port_listening_cmd(port)}; then echo "RESULT:ALREADY_LISTENING"; exit 0; fi; '
@@ -1044,9 +1118,7 @@ def cmd_serve(args):
 def cmd_tunnel(args):
     host = args.host
     cfg = load_host_config(host)
-    remote_port = cfg.get("remote_port", 4096)
-    if args.port is not None and not cfg.get("remote_port"):
-        remote_port = args.port
+    remote_port = getattr(args, "remote_port", None) or resolve_remote_port(cfg, args.port)
 
     default_local_port = cfg.get("local_port", 4096)
     local_port, _ = resolve_local_port(host, requested_port=args.port, default_port=default_local_port, remote_port=remote_port)
@@ -1061,9 +1133,11 @@ def cmd_tunnel(args):
             pid = data.get("pid")
             if pid and is_process_running(pid):
                 active_port = data.get("local_port", data.get("port", local_port))
-                ok, detail = probe_http(active_port)
+                saved_remote_port = data.get("remote_port", remote_port)
+                ports_match = (args.port is None or args.port == active_port) and saved_remote_port == remote_port
+                ok, detail = probe_http(active_port) if ports_match else (False, "PortChanged")
                 pwd = data.get("password") or get_remote_server_password(host, cfg)
-                if ok:
+                if ok and ports_match:
                     print(f"{GREEN}Tunnel for '{host}' is already running.{RESET}")
                     print(f"PID: {pid} | Port: {active_port}")
                     print(f"{GREEN}E2E OK: {detail}{RESET}")
@@ -1085,8 +1159,9 @@ def cmd_tunnel(args):
         except Exception:
             pass
 
+    target = ssh_target(host)
     print(f"{BLUE}Establishing SSH tunnel to '{host}' (localhost:{local_port} -> 127.0.0.1:{remote_port})...{RESET}")
-    cmd = ["ssh"] + ssh_opts(host, ctl=False) + ["-N", "-f", "-L", f"{local_port}:127.0.0.1:{remote_port}", host]
+    cmd = ["ssh"] + ssh_opts(host, ctl=False) + ["-N", "-f", "-L", f"{local_port}:127.0.0.1:{remote_port}", target]
     try:
         res = subprocess.run(cmd, env=ssh_env(_HOST_PASSWORDS.get(host)))
         tunnel_started = res.returncode == 0
@@ -1104,7 +1179,13 @@ def cmd_tunnel(args):
                 break
 
         pwd = get_remote_server_password(host, cfg)
-        tunnel_data = {
+        tunnel_data = {}
+        if tunnel_file.exists():
+            try:
+                tunnel_data = json.loads(tunnel_file.read_text())
+            except Exception:
+                pass
+        tunnel_data.update({
             "host": host,
             "port": local_port,
             "local_port": local_port,
@@ -1113,7 +1194,7 @@ def cmd_tunnel(args):
             "password": pwd,
             "remote_directory": cfg.get("remote_directory"),
             "started_at": time.time()
-        }
+        })
         tunnel_file.write_text(json.dumps(tunnel_data, indent=2))
 
         if ok:
@@ -1147,19 +1228,17 @@ def cmd_connect(args):
     host = args.host
     set_process_title(f"opencode: {host}")
     cfg = load_host_config(host)
-    remote_port = cfg.get("remote_port", 4096)
-    if args.port is not None and not cfg.get("remote_port"):
-        remote_port = args.port
+    remote_port = resolve_remote_port(cfg, args.port)
 
     default_local_port = cfg.get("local_port", 4096)
     local_port, _ = resolve_local_port(host, requested_port=args.port, default_port=default_local_port, remote_port=remote_port)
-    remote_dir = args.dir or cfg.get("remote_directory") or get_remote_default_dir(host)
+    configured_dir = args.dir or cfg.get("remote_directory")
     password = getattr(args, "password", None) or cfg.get("opencode_password")
 
     # If --sshfs or --mount was passed explicitly, branch immediately to SSHFS mode
     sshfs_arg = getattr(args, "sshfs", None)
     if sshfs_arg is not None:
-        target_dir = sshfs_arg if (isinstance(sshfs_arg, str) and sshfs_arg != ".") else remote_dir
+        target_dir = sshfs_arg if (isinstance(sshfs_arg, str) and sshfs_arg != ".") else configured_dir
         print(f"{BOLD}=== Connecting to Remote OpenCode (SSHFS Mode): {host} ==={RESET}\n")
         connect_via_sshfs(host, remote_dir=target_dir, args=args, cfg=cfg)
         return
@@ -1180,6 +1259,8 @@ def cmd_connect(args):
         sys.exit(1)
     print(f" {GREEN}ONLINE{RESET}")
 
+    remote_dir = configured_dir or get_remote_default_dir(host)
+
     # 2. Remote serve daemon — real HTTP health probe + auto-repair
     print(f"[2/4] Verifying remote 'opencode serve' (port {remote_port})...", end="", flush=True)
     healthy = remote_service_healthy(host, remote_port)
@@ -1187,10 +1268,7 @@ def cmd_connect(args):
         print(f" {GREEN}RUNNING (HTTP OK){RESET}")
     elif healthy is False:
         # Port accepts TCP but does not answer (hung daemon) -> recycle it.
-        listening = subprocess.run(
-            ["ssh"] + ssh_opts(host) + [host, remote_port_listening_cmd(remote_port)],
-            capture_output=True,
-        ).returncode == 0
+        listening = ssh_run(host, remote_port_listening_cmd(remote_port), timeout=15, interactive=False).returncode == 0
         if listening:
             print(f" {YELLOW}HUNG (accepts TCP, no HTTP) - restarting daemon...{RESET}")
             kill_remote_serve(host, remote_port)
@@ -1223,7 +1301,7 @@ def cmd_connect(args):
         print(f" {GREEN}ACTIVE ({detail}){RESET}")
     else:
         print(f" {YELLOW}INACTIVE - establishing tunnel...{RESET}")
-        tunnel_args = argparse.Namespace(host=host, port=local_port, fatal=False)
+        tunnel_args = argparse.Namespace(host=host, port=local_port, remote_port=remote_port, fatal=False)
         cmd_tunnel(tunnel_args)
         ok, detail = probe_http(local_port)
         if not ok:
@@ -1271,8 +1349,11 @@ def cmd_connect(args):
     cmd = ["opencode", "--server", server_url]
     if remote_dir:
         cmd.append(remote_dir)
-    if getattr(args, "extra_args", None):
-        cmd.extend(args.extra_args)
+    extra = list(getattr(args, "extra_args", None) or [])
+    if extra and extra[0] == "--":
+        extra = extra[1:]
+    if extra:
+        cmd.extend(extra)
 
     exit_code = 0
     try:
@@ -1296,7 +1377,7 @@ def cmd_connect(args):
     else:
         print(f"\n{BLUE}[ℹ] SSH tunnel for '{host}' (localhost:{local_port}) remains active in background.{RESET}")
         print(f"    To stop: {BOLD}opencode-remote stop {host}{RESET} (or {BOLD}ocd stop {host}{RESET})")
-        print(f"    To keep it open on exit: {BOLD}opencode-remote connect {host} --keep-tunnel{RESET}\n")
+        print(f"    To close it automatically on exit: {BOLD}opencode-remote connect {host} --close-tunnel{RESET}\n")
 
     sys.exit(exit_code)
 
@@ -1329,7 +1410,7 @@ def _status_one(host, port=None, timeout=4):
             pass
 
     local_port = port if port is not None else (saved_local_port or cfg.get("local_port", 4096))
-    remote_port = saved_remote_port or cfg.get("remote_port", local_port)
+    remote_port = saved_remote_port or resolve_remote_port(cfg, port)
 
     row = {"host": host, "local_port": local_port, "remote_port": remote_port}
 
@@ -1344,9 +1425,9 @@ def _status_one(host, port=None, timeout=4):
         if healthy is True:
             row["serve"] = "RUNNING"
         elif healthy is False:
-            listening = subprocess.run(
-                ["ssh"] + ssh_opts(host) + [host, remote_port_listening_cmd(remote_port)],
-                capture_output=True, timeout=timeout + 8,
+            listening = ssh_run(
+                host, remote_port_listening_cmd(remote_port),
+                timeout=timeout + 8, interactive=False
             ).returncode == 0
             row["serve"] = "HUNG" if listening else "STOPPED"
         else:
@@ -1434,7 +1515,7 @@ def cmd_status(args):
             pass
 
     local_port = args.port if args.port is not None else (saved_local_port or cfg.get("local_port", 4096))
-    remote_port = saved_remote_port or cfg.get("remote_port", local_port)
+    remote_port = saved_remote_port or resolve_remote_port(cfg, args.port)
 
     print(f"{BOLD}=== Status for Remote Host: {host} ==={RESET}\n")
 
@@ -1453,9 +1534,9 @@ def cmd_status(args):
         if healthy is True:
             print(f"{GREEN}RUNNING (HTTP OK){RESET}")
         elif healthy is False:
-            listening = subprocess.run(
-                ["ssh"] + ssh_opts(host) + [host, remote_port_listening_cmd(remote_port)],
-                capture_output=True, timeout=20,
+            listening = ssh_run(
+                host, remote_port_listening_cmd(remote_port),
+                timeout=20, interactive=False
             ).returncode == 0
             if listening:
                 print(f"{RED}HUNG{RESET}  (port open but no HTTP answer)")
@@ -1510,7 +1591,7 @@ def cmd_stop(args):
             pass
 
     local_port = args.port if args.port is not None else (saved_local_port or cfg.get("local_port", 4096))
-    remote_port = saved_remote_port or cfg.get("remote_port", local_port)
+    remote_port = saved_remote_port or resolve_remote_port(cfg, args.port)
 
     print(f"{BLUE}Stopping remote services and local tunnels for host '{host}'...{RESET}")
 
@@ -1525,7 +1606,7 @@ def cmd_stop(args):
         f'if [ -n "$PID" ]; then kill "$PID" && echo "Stopped remote serve PID $PID"; '
         f'else echo "No process listening on remote port {remote_port}"; fi'
     )
-    subprocess.run(["ssh"] + ssh_opts(host) + [host, stop_cmd])
+    ssh_run(host, stop_cmd, capture=False, timeout=15)
     close_ssh_master(host)
     print(f"{GREEN}Cleanup complete for '{host}'.{RESET}")
 
@@ -1551,26 +1632,27 @@ def cmd_unmount(args):
 
     print(f"{BLUE}Unmounting:{RESET} {target_mountpoint}")
 
-    res = subprocess.run(["fusermount", "-u", target_mountpoint], capture_output=True, text=True)
-    if res.returncode != 0:
-        res = subprocess.run(["umount", target_mountpoint], capture_output=True, text=True)
+    res = unmount_path(target_mountpoint)
+    still_mounted = is_mounted(target_mountpoint)
 
-    mounts = [m for m in mounts if m.get("mountpoint") != target_mountpoint]
-    save_mounts_state(mounts)
+    if not still_mounted:
+        mounts = [m for m in mounts if m.get("mountpoint") != target_mountpoint]
+        save_mounts_state(mounts)
 
-    try:
-        mp = Path(target_mountpoint)
-        if mp.exists() and mp.is_dir() and not any(mp.iterdir()):
-            mp.rmdir()
-            if mp.parent.exists() and mp.parent.is_dir() and not any(mp.parent.iterdir()):
-                mp.parent.rmdir()
-    except Exception:
-        pass
+        try:
+            mp = Path(target_mountpoint)
+            if mp.exists() and mp.is_dir() and not any(mp.iterdir()):
+                mp.rmdir()
+                if mp.parent.exists() and mp.parent.is_dir() and not any(mp.parent.iterdir()):
+                    mp.parent.rmdir()
+        except Exception:
+            pass
 
-    if res.returncode == 0:
         print(f"{GREEN}Successfully unmounted {target_mountpoint}.{RESET}")
     else:
-        print(f"{YELLOW}Unmount completed or reported warning for {target_mountpoint}.{RESET}")
+        err_msg = (res.stderr or res.stdout or "").strip()
+        print(f"{RED}Failed to unmount {target_mountpoint}{f': {err_msg}' if err_msg else '.'}{RESET}", file=sys.stderr)
+        sys.exit(res.returncode or 1)
 
 
 def cmd_mounts(args):
@@ -1590,7 +1672,7 @@ def cmd_mounts(args):
     for m in mounts:
         mp = m.get("mountpoint", "")
         seen_mountpoints.add(mp)
-        is_active = any(mp in line for line in active_system_mounts)
+        is_active = is_mounted(mp, active_system_mounts)
         status_str = f"{GREEN}MOUNTED{RESET}" if is_active else f"{RED}STALE/UNMOUNTED{RESET}"
         print(fmt.format(
             m.get("host", "-")[:15],
@@ -1612,11 +1694,12 @@ def cmd_mounts(args):
 
 def cmd_copy_key(args):
     host = args.host
+    target = ssh_target(host)
     print(f"{BLUE}Configurando chave SSH pública no host '{host}' via ssh-copy-id...{RESET}")
     cmd = ["ssh-copy-id"]
     if getattr(args, "identity_file", None):
         cmd.extend(["-i", args.identity_file])
-    cmd.append(host)
+    cmd.append(target)
     res = subprocess.run(cmd)
     if res.returncode == 0:
         print(f"\n{GREEN}Chave SSH instalada com sucesso em '{host}'!{RESET}")

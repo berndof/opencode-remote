@@ -50,6 +50,13 @@ function saveConfig(config: RemotePluginConfig) {
   } catch {}
 }
 
+const IGNORED_SSH_HOSTS = new Set([
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "ssh.dev.azure.com",
+])
+
 function getHosts(): Host[] {
   const hosts = new Set<string>()
   try {
@@ -64,10 +71,21 @@ function getHosts(): Host[] {
     const sshConfig = `${homedir()}/.ssh/config`
     if (existsSync(sshConfig)) {
       const lines = readFileSync(sshConfig, "utf8").split("\n")
-      for (const line of lines) {
-        const match = line.trim().match(/^Host\s+([^*?!\s]+)$/i)
-        if (match && match[1] && match[1] !== "github.com") {
-          hosts.add(match[1])
+      for (const rawLine of lines) {
+        const line = rawLine.replace(/#.*$/, "").trim()
+        const match = line.match(/^Host(?:\s+|\s*=\s*)(.+)$/i)
+        if (match && match[1]) {
+          for (const token of match[1].split(/\s+/)) {
+            if (
+              token &&
+              !token.includes("*") &&
+              !token.includes("?") &&
+              !token.startsWith("!") &&
+              !IGNORED_SSH_HOSTS.has(token.toLowerCase())
+            ) {
+              hosts.add(token)
+            }
+          }
         }
       }
     }
@@ -264,7 +282,7 @@ export default {
       try {
         switch (action) {
           case "status":
-            return await oc(["status", host])
+            return host ? await oc(["status", host]) : await oc(["status"])
           case "serve":
           case "up": {
             // Bring the remote daemon up and open the local tunnel in one step.
@@ -295,6 +313,8 @@ export default {
           }
           case "unmount":
             return await oc(["unmount", host])
+          case "mounts":
+            return await oc(["mounts"])
           case "list":
             return await oc(["list"])
           case "provision":
@@ -309,7 +329,7 @@ export default {
               `   (ou: opencode-remote connect ${host})`,
               ``,
               `O comando unificado automaticamente:`,
-              `  1. Inicia o 'opencode serve' no servidor remoto`,
+              `  1. Inicia o 'opencode serve' no servidor remoto (ou faz fallback via SSHFS)`,
               `  2. Abre e valida o túnel SSH local`,
               `  3. Detecta a senha e autentica o cliente`,
               `  4. Abre o OpenCode TUI já conectado!`,
@@ -318,7 +338,7 @@ export default {
               `Encerrar:    ocd stop ${host}`,
             ].join("\n")
           default:
-            return await oc([action, host])
+            return host ? await oc([action, host]) : await oc([action])
         }
       } catch (e) {
         return String(e)
@@ -326,16 +346,17 @@ export default {
     }
 
     const executeAction = async (action: string, host: string) => {
+      const targetLabel = host || "todos os hosts"
       showToast({
         title: `opencode-remote ${action}`,
-        message: `Executando ${action} para ${host}…`,
+        message: `Executando ${action} (${targetLabel})…`,
         variant: "info",
         duration: 8000,
       })
 
       const out = await dispatch(action, host)
       if (out) {
-        await showAlert(`opencode-remote ${action} (${host})`, out)
+        await showAlert(`opencode-remote ${action}${host ? ` (${host})` : ""}`, out)
       }
     }
 
@@ -390,6 +411,11 @@ export default {
           description: "Mágica: Use o servidor remoto editando arquivos localmente",
         },
         {
+          title: "📂 Listar montagens SSHFS ativas (mounts)",
+          value: "mounts",
+          description: "Mostra pastas remotas atualmente montadas via SSHFS",
+        },
+        {
           title: "❌ Desmontar pasta (unmount)",
           value: "unmount",
           description: "Desmonta a conexão local SSHFS",
@@ -400,6 +426,11 @@ export default {
           description: "rsync do diretório atual para o host",
         },
         {
+          title: "📦 Provisionar OpenCode no host (provision)",
+          value: "provision",
+          description: "Instala OpenCode headless e sincroniza plugins/skills",
+        },
+        {
           title: "⬇ Parar serviço / túnel (stop)",
           value: "stop",
           description: "Encerra o túnel e o serviço nesta porta",
@@ -407,7 +438,7 @@ export default {
         {
           title: "📋 Lista de hosts (list)",
           value: "list",
-          description: "Connectividade de todos os hosts do ~/.ssh/config",
+          description: "Conectividade de todos os hosts do ~/.ssh/config",
         },
         {
           title: "⚙️ Configurar exibição no footer",
@@ -477,11 +508,19 @@ export default {
         return
       }
 
+      if (["list", "mounts"].includes(first)) {
+        await executeAction(first, "")
+        return
+      }
+
       if (
-        ["status", "serve", "tunnel", "stop", "sync", "list", "provision", "connect", "up", "down"].includes(first)
+        ["status", "serve", "tunnel", "stop", "sync", "mount", "unmount", "provision", "connect", "up", "down"].includes(first)
       ) {
         if (parts.length > 1) {
           await executeAction(first, parts[1])
+        } else if (first === "status") {
+          const hosts = getHosts()
+          await executeAction("status", hosts.length === 1 ? hosts[0].id : "")
         } else {
           const hosts = getHosts()
           if (hosts.length === 1) {
